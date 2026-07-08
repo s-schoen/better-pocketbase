@@ -19,3 +19,8 @@ To pass PocketBase CLI flags through the run task, use `--`:
 ```sh
 go-task run -- --help
 ```
+
+## PocketBase Extensions
+
+You can find the official documentation for PocketBase extensions here: https://pocketbase.io/docs/go-overview/
+Make sure to always implement features using the official API if possible
