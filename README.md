@@ -5,5 +5,5 @@ PocketBase with some custom improvements.
 ## Run
 
 ```sh
-go run . serve
+go-task run
 ```
