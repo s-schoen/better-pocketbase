@@ -264,6 +264,26 @@ func TestSuperuserCanManageUserTokens(t *testing.T) {
 	}
 }
 
+func TestUIExtensionIsServed(t *testing.T) {
+	_, handler := newTestApp(t)
+
+	status, body := requestJSON(t, handler, http.MethodGet, "/_/extensions.js", nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected extensions.js status %d, got %d: %s", http.StatusOK, status, body)
+	}
+	if !strings.Contains(string(body), "#/settings/api-tokens") {
+		t.Fatalf("expected extensions.js to include api token route, got: %s", body)
+	}
+
+	status, body = requestJSON(t, handler, http.MethodGet, "/_/extensions/api-tokens/style.css", nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected extension stylesheet status %d, got %d: %s", http.StatusOK, status, body)
+	}
+	if !strings.Contains(string(body), ".page-api-tokens") {
+		t.Fatalf("expected extension stylesheet content, got: %s", body)
+	}
+}
+
 func newTestApp(t *testing.T) (*tests.TestApp, http.Handler) {
 	t.Helper()
 

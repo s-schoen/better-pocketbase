@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"embed"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"math/big"
 	"net/http"
@@ -35,11 +37,15 @@ const (
 	RequestContextAPIToken = "apiToken"
 
 	requestEventKeyAPITokenAuth = "betterPocketBaseApiTokenAuth"
+	uiExtensionName             = "api-tokens"
 
 	defaultPage    = 1
 	defaultPerPage = 30
 	maxPerPage     = 100
 )
+
+//go:embed ui/*
+var uiAssets embed.FS
 
 var (
 	errInvalidToken = errors.New("invalid api token")
@@ -91,6 +97,8 @@ func Register(app core.App) {
 	app.OnServe().Bind(&hook.Handler[*core.ServeEvent]{
 		Id: "betterPocketBaseApiTokens",
 		Func: func(e *core.ServeEvent) error {
+			registerUIExtension(e)
+
 			e.Router.Bind(apiTokenAuthMiddleware())
 
 			group := e.Router.Group("/api/api-tokens").Bind(jwtOnlyManagementAuth())
@@ -108,6 +116,19 @@ func Register(app core.App) {
 		}
 
 		return e.Next()
+	})
+}
+
+func registerUIExtension(e *core.ServeEvent) {
+	fsys, err := fs.Sub(uiAssets, "ui")
+	if err != nil {
+		e.App.Logger().Error("failed to register api token UI extension", "error", err)
+		return
+	}
+
+	e.UIExtensions = append(e.UIExtensions, core.UIExtension{
+		Name: uiExtensionName,
+		FS:   fsys,
 	})
 }
 
