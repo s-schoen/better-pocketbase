@@ -32,7 +32,7 @@ func init() {
 				OnUpdate: true,
 			},
 			&core.TextField{
-				Name:     "userId",
+				Name:     "authRecordId",
 				System:   true,
 				Required: true,
 				Min:      1,
@@ -87,7 +87,7 @@ func init() {
 		)
 
 		collection.AddIndex("idx_api_tokens_access_key", true, "accessKey", "")
-		collection.AddIndex("idx_api_tokens_user_created", false, "userId, created", "")
+		collection.AddIndex("idx_api_tokens_auth_record_created", false, "authRecordId, created", "")
 
 		return app.Save(collection)
 	}, nil)

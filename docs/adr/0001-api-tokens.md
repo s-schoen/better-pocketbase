@@ -1,6 +1,6 @@
 # ADR 0001: User API Tokens
 
-Status: Accepted
+Status: Accepted, amended by ADR 0003 for auth-record ownership
 Date: 2026-07-08
 
 ## Context

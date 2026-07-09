@@ -13,7 +13,7 @@
 }
 
 .page-api-tokens .api-token-filter,
-.api-token-create-modal .api-token-user-picker {
+.api-token-create-modal .api-token-owner-picker {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -29,12 +29,18 @@
     color: var(--surfaceTxtHintColor);
 }
 
-.page-api-tokens .api-tokens-table-scroll {
-    overflow-x: auto;
-}
+@media (min-width: 701px) {
+    .page-api-tokens .api-tokens-table .col-field-name-name {
+        min-width: 160px;
+    }
 
-.page-api-tokens .api-tokens-table {
-    min-width: 980px;
+    .page-api-tokens .api-tokens-table .col-field-name-authRecordId {
+        min-width: 220px;
+    }
+
+    .page-api-tokens .api-tokens-table .col-field-name-accessKey {
+        min-width: 170px;
+    }
 }
 
 .page-api-tokens .api-token-owner {
@@ -47,51 +53,6 @@
 .api-token-reveal-modal .api-token-secret code {
     font-family: var(--monospaceFontFamily);
     word-break: break-all;
-}
-
-.page-api-tokens .api-token-status {
-    display: inline-flex;
-    align-items: center;
-    border-radius: var(--borderRadius);
-    padding: 2px 8px;
-    font-size: var(--smFontSize);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-}
-
-.page-api-tokens .api-token-status-active {
-    color: var(--successColor);
-    background: color-mix(in srgb, var(--successColor) 12%, transparent);
-}
-
-.page-api-tokens .api-token-status-expired {
-    color: var(--warningColor);
-    background: color-mix(in srgb, var(--warningColor) 14%, transparent);
-}
-
-.page-api-tokens .api-token-status-revoked {
-    color: var(--dangerColor);
-    background: color-mix(in srgb, var(--dangerColor) 12%, transparent);
-}
-
-.page-api-tokens .api-token-actions {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-}
-
-.page-api-tokens .api-tokens-pagination {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    flex-wrap: wrap;
-}
-
-.page-api-tokens .api-tokens-pagination-actions {
-    display: flex;
-    gap: 8px;
 }
 
 .api-token-reveal-modal .api-token-secret {
@@ -108,40 +69,15 @@
     flex: 1;
 }
 
-.api-token-details-modal .api-token-details-table {
-    width: 100%;
-    border-collapse: collapse;
-}
-
-.api-token-details-modal .api-token-details-table th,
-.api-token-details-modal .api-token-details-table td {
-    padding: 8px 0;
-    border-bottom: 1px solid var(--surfaceAlt3Color);
-    text-align: left;
-    vertical-align: top;
+.api-token-preview-modal .api-token-preview-table td {
     word-break: break-word;
 }
 
-.api-token-details-modal .api-token-details-table th {
-    width: 140px;
-    color: var(--surfaceTxtHintColor);
-    font-weight: 600;
+.api-token-preview-modal .api-token-preview-table th {
+    white-space: nowrap;
 }
 
 @media (max-width: 700px) {
-    .page-api-tokens .api-tokens-table {
-        min-width: 780px;
-    }
-
-    .page-api-tokens .api-tokens-pagination,
-    .page-api-tokens .api-tokens-pagination-actions {
-        width: 100%;
-    }
-
-    .page-api-tokens .api-tokens-pagination-actions .btn {
-        flex: 1;
-    }
-
     .api-token-reveal-modal .api-token-secret {
         align-items: stretch;
         flex-direction: column;

@@ -44,8 +44,8 @@ func TestCreateListAndAuthenticateWithAPIToken(t *testing.T) {
 	if created.Item.AccessKey != parts.Access {
 		t.Fatalf("expected access key %q, got %q", parts.Access, created.Item.AccessKey)
 	}
-	if created.Item.UserID != user.Id {
-		t.Fatalf("expected user id %q, got %q", user.Id, created.Item.UserID)
+	if created.Item.AuthRecordID != user.Id {
+		t.Fatalf("expected auth record id %q, got %q", user.Id, created.Item.AuthRecordID)
 	}
 	if strings.Contains(string(body), "secretHash") {
 		t.Fatalf("create response leaked secret material: %s", body)
@@ -206,12 +206,64 @@ func TestUsersAuthRuleIsEnforcedForAPITokens(t *testing.T) {
 	}
 }
 
-func TestUserDeleteRemovesAPITokens(t *testing.T) {
+func TestCustomAuthCollectionCanUseAPIToken(t *testing.T) {
+	app, handler := newTestApp(t)
+	authRecord, jwt := createCustomAuthRecord(t, app, "api_token_clients", "api-token-client@example.com")
+	item := createProtectedItem(t, app)
+
+	created := createTokenViaAPI(t, handler, jwt, map[string]any{"name": "client integration"})
+	if created.Item.AuthRecordID != authRecord.Id {
+		t.Fatalf("expected auth record id %q, got %q", authRecord.Id, created.Item.AuthRecordID)
+	}
+
+	status, body := requestJSON(t, handler, http.MethodGet, "/api/collections/api_token_items/records/"+item.Id, nil, map[string]string{
+		headerAPIKey: created.Token,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("expected custom auth token status %d, got %d: %s", http.StatusOK, status, body)
+	}
+}
+
+func TestSuperuserAPITokenAuthenticatesAsSuperuser(t *testing.T) {
+	app, handler := newTestApp(t)
+	superuser, superJWT := createSuperuser(t, app, "api-token-superuser-key@example.com")
+
+	created := createTokenViaAPI(t, handler, superJWT, map[string]any{
+		"name":         "superuser automation",
+		"authRecordId": superuser.Id,
+	})
+	if created.Item.AuthRecordID != superuser.Id {
+		t.Fatalf("expected superuser token auth record id %q, got %q", superuser.Id, created.Item.AuthRecordID)
+	}
+
+	status, body := requestJSON(t, handler, http.MethodGet, "/api/settings", nil, map[string]string{
+		headerAPIKey: created.Token,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("expected superuser API-key settings status %d, got %d: %s", http.StatusOK, status, body)
+	}
+}
+
+func TestAuthRecordCannotCreateTokenForAnotherAuthRecord(t *testing.T) {
+	app, handler := newTestApp(t)
+	_, jwt := createUser(t, app, "api-token-owner@example.com")
+	other, _ := createCustomAuthRecord(t, app, "api_token_other_clients", "api-token-other-client@example.com")
+
+	status, body := requestJSON(t, handler, http.MethodPost, "/api/api-tokens", map[string]any{
+		"name":         "not mine",
+		"authRecordId": other.Id,
+	}, map[string]string{"Authorization": jwt})
+	if status != http.StatusForbidden {
+		t.Fatalf("expected other auth record create status %d, got %d: %s", http.StatusForbidden, status, body)
+	}
+}
+
+func TestAuthRecordDeleteRemovesAPITokens(t *testing.T) {
 	app, handler := newTestApp(t)
 	user, jwt := createUser(t, app, "api-token-delete@example.com")
 	createTokenViaAPI(t, handler, jwt, map[string]any{"name": "delete user"})
 
-	count, err := app.CountRecords(CollectionName, dbx.HashExp{"userId": user.Id})
+	count, err := app.CountRecords(CollectionName, dbx.HashExp{"authRecordId": user.Id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,12 +275,35 @@ func TestUserDeleteRemovesAPITokens(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	count, err = app.CountRecords(CollectionName, dbx.HashExp{"userId": user.Id})
+	count, err = app.CountRecords(CollectionName, dbx.HashExp{"authRecordId": user.Id})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
 		t.Fatalf("expected tokens to be removed after user delete, got %d", count)
+	}
+
+	customAuthRecord, customJWT := createCustomAuthRecord(t, app, "api_token_delete_clients", "api-token-delete-client@example.com")
+	createTokenViaAPI(t, handler, customJWT, map[string]any{"name": "delete client"})
+
+	count, err = app.CountRecords(CollectionName, dbx.HashExp{"authRecordId": customAuthRecord.Id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one token before custom auth record delete, got %d", count)
+	}
+
+	if err := app.Delete(customAuthRecord); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err = app.CountRecords(CollectionName, dbx.HashExp{"authRecordId": customAuthRecord.Id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expected tokens to be removed after custom auth record delete, got %d", count)
 	}
 }
 
@@ -238,17 +313,17 @@ func TestSuperuserCanManageUserTokens(t *testing.T) {
 	_, superJWT := createSuperuser(t, app, "api-token-admin@example.com")
 
 	created := createTokenViaAPI(t, handler, superJWT, map[string]any{
-		"name":   "admin-created",
-		"userId": user.Id,
+		"name":         "admin-created",
+		"authRecordId": user.Id,
 	})
-	if created.Item.UserID != user.Id {
-		t.Fatalf("expected admin-created token for user %q, got %q", user.Id, created.Item.UserID)
+	if created.Item.AuthRecordID != user.Id {
+		t.Fatalf("expected admin-created token for auth record %q, got %q", user.Id, created.Item.AuthRecordID)
 	}
 	if !strings.HasPrefix(created.Item.CreatedBy, core.CollectionNameSuperusers+":") {
 		t.Fatalf("expected superuser createdBy, got %q", created.Item.CreatedBy)
 	}
 
-	status, body := requestJSON(t, handler, http.MethodGet, "/api/api-tokens?userId="+user.Id, nil, map[string]string{"Authorization": superJWT})
+	status, body := requestJSON(t, handler, http.MethodGet, "/api/api-tokens?authRecordId="+user.Id, nil, map[string]string{"Authorization": superJWT})
 	if status != http.StatusOK {
 		t.Fatalf("expected superuser list status %d, got %d: %s", http.StatusOK, status, body)
 	}
@@ -363,6 +438,30 @@ func createSuperuser(t *testing.T, app core.App, email string) (*core.Record, st
 	return superuser, jwt
 }
 
+func createCustomAuthRecord(t *testing.T, app core.App, collectionName string, email string) (*core.Record, string) {
+	t.Helper()
+
+	collection := core.NewAuthCollection(collectionName)
+	if err := app.Save(collection); err != nil {
+		t.Fatal(err)
+	}
+
+	record := core.NewRecord(collection)
+	record.SetEmail(email)
+	record.SetPassword("1234567890")
+	record.SetVerified(true)
+	if err := app.Save(record); err != nil {
+		t.Fatal(err)
+	}
+
+	jwt, err := record.NewAuthToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return record, jwt
+}
+
 func createProtectedItem(t *testing.T, app core.App) *core.Record {
 	t.Helper()
 
@@ -404,7 +503,7 @@ func createTokenViaAPI(t *testing.T, handler http.Handler, jwt string, body map[
 	return response
 }
 
-func createStoredToken(t *testing.T, app core.App, user *core.Record, name string, expiresAt types.DateTime) (string, *core.Record) {
+func createStoredToken(t *testing.T, app core.App, authRecord *core.Record, name string, expiresAt types.DateTime) (string, *core.Record) {
 	t.Helper()
 
 	parts, rawToken, err := newTokenParts()
@@ -418,11 +517,11 @@ func createStoredToken(t *testing.T, app core.App, user *core.Record, name strin
 	}
 
 	record := core.NewRecord(collection)
-	record.Set("userId", user.Id)
+	record.Set("authRecordId", authRecord.Id)
 	record.Set("name", name)
 	record.Set("accessKey", parts.Access)
 	record.Set("secretHash", hashSecret(parts.Secret))
-	record.Set("createdBy", "users:"+user.Id)
+	record.Set("createdBy", actorID(authRecord))
 	if !expiresAt.IsZero() {
 		record.Set("expiresAt", expiresAt)
 	}
