@@ -1,20 +1,20 @@
 # API keys
 
-API keys let a program or integration access the PocketBase API as a regular application user without using that user's password. They are useful for automation, scripts, CI jobs, background workers, and other machine-to-machine access.
+API keys let a program or integration access the PocketBase API as an existing auth record without using that record's password. They are useful for automation, scripts, CI jobs, background workers, and other machine-to-machine access.
 
-An API key authenticates as the user that owns it. It does not have separate permissions or scopes. Any request made with an API key is still checked against the normal PocketBase collection rules for that user.
+An API key authenticates as the auth record that owns it. It does not have separate permissions or scopes. Any request made with an API key is still checked against the normal PocketBase collection rules for that auth record. A superuser-owned API key is a full superuser credential.
 
 ## How API keys work
 
 - API keys are sent in the `X-API-Key` HTTP header.
-- API keys can belong only to records in the `users` auth collection.
+- API keys can belong to any PocketBase auth collection record, including `_superusers`.
 - API keys can be active, expired, or revoked.
 - The full key is shown only once when it is created.
 - The visible `accessKey` is only an identifier. It is not enough to authenticate.
 - API key usage updates the key's `lastUsedAt` timestamp.
-- Deleting a user also deletes that user's API keys.
+- Deleting an owning auth record also deletes that record's API keys.
 
-API keys are bearer credentials. Anyone who has the full key can act as the owning user until the key expires or is revoked.
+API keys are bearer credentials. Anyone who has the full key can act as the owning auth record until the key expires or is revoked.
 
 ## Create an API key in the Dashboard
 
@@ -23,7 +23,7 @@ Superusers can manage API keys from the PocketBase Dashboard:
 1. Open the Dashboard.
 2. Go to `Settings > Security > API tokens`.
 3. Click `Create token`.
-4. Select the user that should own the key.
+4. Select the auth collection and auth record that should own the key.
 5. Enter a clear name, such as `CI deployment` or `Reporting sync`.
 6. Optionally set an expiration date.
 7. Create the key.
@@ -46,15 +46,15 @@ Do not send an API key together with an `Authorization` header. Requests that co
 
 ## Manage your own API keys through the API
 
-Authenticated `users` records can list, create, and revoke their own API keys through `/api/api-tokens`. These management endpoints require a normal PocketBase login token in the `Authorization` header. They do not accept API-key authentication.
+Authenticated auth records can list, create, and revoke their own API keys through `/api/api-tokens`. These management endpoints require a normal PocketBase login token in the `Authorization` header. They do not accept API-key authentication.
 
-Replace `<user-jwt>` with the auth token returned by your normal user login flow.
+Replace `<auth-record-jwt>` with the auth token returned by your normal auth flow.
 
 ### List your API keys
 
 ```sh
 curl "https://example.com/api/api-tokens" \
-  -H "Authorization: <user-jwt>"
+  -H "Authorization: <auth-record-jwt>"
 ```
 
 The response is paginated and includes active, expired, and revoked keys:
@@ -68,7 +68,7 @@ The response is paginated and includes active, expired, and revoked keys:
   "items": [
     {
       "id": "abc123",
-      "userId": "user123",
+      "authRecordId": "authrecord123",
       "name": "CI deployment",
       "accessKey": "0000000000000000000000000",
       "status": "active",
@@ -77,7 +77,7 @@ The response is paginated and includes active, expired, and revoked keys:
       "expiresAt": "",
       "revokedAt": "",
       "lastUsedAt": "",
-      "createdBy": "users:user123",
+      "createdBy": "users:authrecord123",
       "revokedBy": ""
     }
   ]
@@ -91,7 +91,7 @@ Use `page` and `perPage` query parameters to page through results. `perPage` can
 ```sh
 curl "https://example.com/api/api-tokens" \
   -X POST \
-  -H "Authorization: <user-jwt>" \
+  -H "Authorization: <auth-record-jwt>" \
   -H "Content-Type: application/json" \
   -d '{"name":"CI deployment","expiresAt":"2026-12-31T23:59:59Z"}'
 ```
@@ -105,7 +105,7 @@ The response includes the full key once:
   "token": "pb_0000000000000000000000000.00000000000000000000000000000000000000000000000000",
   "item": {
     "id": "abc123",
-    "userId": "user123",
+    "authRecordId": "authrecord123",
     "name": "CI deployment",
     "accessKey": "0000000000000000000000000",
     "status": "active"
@@ -120,7 +120,7 @@ Save the `token` value immediately. Later list responses show only metadata and 
 ```sh
 curl "https://example.com/api/api-tokens/abc123" \
   -X DELETE \
-  -H "Authorization: <user-jwt>"
+  -H "Authorization: <auth-record-jwt>"
 ```
 
 Revoking a key is permanent. A revoked key can no longer authenticate, but its metadata remains visible for auditing.
@@ -139,26 +139,25 @@ curl "https://example.com/api/api-tokens" \
 Superusers can filter by owner:
 
 ```sh
-curl "https://example.com/api/api-tokens?userId=user123" \
+curl "https://example.com/api/api-tokens?authRecordId=authrecord123" \
   -H "Authorization: <superuser-jwt>"
 ```
 
-Superusers can create a key for a user by passing `userId`:
+Superusers can create a key for any auth record by passing `authRecordId`:
 
 ```sh
 curl "https://example.com/api/api-tokens" \
   -X POST \
   -H "Authorization: <superuser-jwt>" \
   -H "Content-Type: application/json" \
-  -d '{"userId":"user123","name":"Reporting sync"}'
+  -d '{"authRecordId":"authrecord123","name":"Reporting sync"}'
 ```
 
 ## Limitations
 
-- API keys have the same permissions as their owning user. There are no per-key scopes in this version.
-- API keys are not automatically revoked when a user changes password or email.
-- API keys cannot authenticate as superusers.
-- API keys cannot belong to auth collections other than `users`.
+- API keys have the same permissions as their owning auth record. There are no per-key scopes in this version.
+- API keys are not automatically revoked when an auth record changes password or email.
+- Superuser-owned API keys are full superuser credentials.
 - API keys cannot be renamed or updated. Revoke and recreate a key instead.
 - There is no built-in key rotation workflow.
 - There are no per-key quotas or rate limits. Use your normal PocketBase or deployment-level rate limiting.
@@ -170,6 +169,7 @@ curl "https://example.com/api/api-tokens" \
 - Use HTTPS for every API-key request.
 - Store keys in a secret manager or environment variable, not in source code.
 - Use a separate key for each integration so you can revoke one integration without affecting others.
+- Avoid superuser-owned keys unless the integration really needs full administrative access.
 - Set an expiration date when practical.
 - Revoke unused or suspicious keys.
 - Check `lastUsedAt` to see whether a key is still active.

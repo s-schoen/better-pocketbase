@@ -3,6 +3,7 @@ if (!window.__betterPocketBaseApiTokensUI) {
 
     const extensionBasePath = "/_/extensions/api-tokens";
     const routePath = "#/settings/api-tokens";
+    const tokenQueryKey = "tokenId";
 
     document.head.appendChild(t.link({
         rel: "stylesheet",
@@ -43,11 +44,13 @@ if (!window.__betterPocketBaseApiTokensUI) {
         }
     }
 
-    function pageApiTokens() {
+    function pageApiTokens(route = {}) {
         app.store.title = "API tokens";
 
         const uniqueId = "api_tokens_" + app.utils.randomString();
         const requestKey = uniqueId + "_list";
+        const collectionsRequestKey = uniqueId + "_collections";
+        const queryTokenId = route.query?.[tokenQueryKey]?.[0] || "";
 
         const data = store({
             page: 1,
@@ -55,46 +58,68 @@ if (!window.__betterPocketBaseApiTokensUI) {
             totalItems: 0,
             totalPages: 0,
             items: [],
+            bulkSelected: {},
             owners: {},
             actors: {},
-            selectedUser: null,
-            usersCollection: null,
+            selectedOwner: null,
+            selectedOwnerCollection: null,
+            activeTokenIdOrModel: queryTokenId,
+            authCollections: [],
             setupChecked: false,
             isLoading: false,
             error: "",
 
-            get hasUsersCollection() {
-                return !!data.usersCollection?.id;
+            get hasAuthCollections() {
+                return data.authCollections.length > 0;
             },
-            get canGoPrevious() {
-                return !data.isLoading && data.page > 1;
+            get canLoadMore() {
+                return data.totalPages > 0 && data.page < data.totalPages;
             },
-            get canGoNext() {
-                return !data.isLoading && data.totalPages > 0 && data.page < data.totalPages;
+            get totalSelected() {
+                return Object.keys(data.bulkSelected).length;
+            },
+            get areAllSelected() {
+                return data.items.length > 0 && data.items.every((token) => !!data.bulkSelected[token.id]);
             },
         });
 
-        refreshUsersCollection();
-        loadTokens(1);
+        refreshAuthCollections().then(() => loadTokens(1));
 
-        function findUsersCollection() {
-            return app.store.collections.find((collection) => collection.name == "users" || collection.id == "users");
+        function findAuthCollections() {
+            return app.store.collections
+                .filter((collection) => collection.type == "auth" || collection.name == "_superusers")
+                .sort((a, b) => collectionLabel(a).localeCompare(collectionLabel(b)));
         }
 
-        async function refreshUsersCollection() {
-            let collection = findUsersCollection();
-            if (!collection && app.store.loadCollections) {
+        async function refreshAuthCollections() {
+            let collections = findAuthCollections();
+            if (!collections.length) {
                 try {
-                    await app.store.loadCollections();
-                    collection = findUsersCollection();
-                } catch (err) {
-                    if (!err?.isAbort) {
-                        console.warn("Failed to refresh collections before loading API token UI:", err);
+                    let loaded = await app.pb.collections.getFullList({
+                        requestKey: collectionsRequestKey,
+                    });
+                    if (app.utils.sortedCollectionsByType) {
+                        loaded = app.utils.sortedCollectionsByType(loaded);
                     }
+
+                    app.store.collections = loaded;
+                    collections = findAuthCollections();
+                } catch (err) {
+                    if (err?.isAbort) {
+                        return;
+                    }
+
+                    console.warn("Failed to refresh collections before loading API token UI:", err);
                 }
             }
 
-            data.usersCollection = collection || null;
+            data.authCollections = collections;
+            if (data.selectedOwnerCollection && !collections.find((collection) => collection.id == data.selectedOwnerCollection.id)) {
+                data.selectedOwnerCollection = null;
+            }
+            if (!data.selectedOwnerCollection && collections.length) {
+                data.selectedOwnerCollection = collections[0];
+            }
             data.setupChecked = true;
         }
 
@@ -107,8 +132,8 @@ if (!window.__betterPocketBaseApiTokensUI) {
                 perPage: data.perPage,
             };
 
-            if (data.selectedUser?.id) {
-                query.userId = data.selectedUser.id;
+            if (data.selectedOwner?.id) {
+                query.authRecordId = data.selectedOwner.id;
             }
 
             try {
@@ -118,13 +143,23 @@ if (!window.__betterPocketBaseApiTokensUI) {
                     requestKey: requestKey,
                 });
 
+                const items = result.items || [];
+
+                await resolveReferences(items);
+
                 data.page = result.page || page;
                 data.perPage = result.perPage || data.perPage;
                 data.totalItems = result.totalItems || 0;
                 data.totalPages = result.totalPages || 0;
-                data.items = result.items || [];
 
-                await resolveReferences(data.items);
+                if (data.page == 1) {
+                    data.items = [];
+                    data.bulkSelected = {};
+                }
+
+                for (const item of items) {
+                    pushOrReplaceToken(item);
+                }
 
                 data.isLoading = false;
             } catch (err) {
@@ -141,8 +176,8 @@ if (!window.__betterPocketBaseApiTokensUI) {
             const actorIdsByCollection = {};
 
             for (const item of items) {
-                if (item.userId) {
-                    ownerIds.add(item.userId);
+                if (item.authRecordId) {
+                    ownerIds.add(item.authRecordId);
                 }
 
                 collectActor(item.createdBy, actorIdsByCollection);
@@ -152,9 +187,17 @@ if (!window.__betterPocketBaseApiTokensUI) {
             const nextOwners = Object.assign({}, data.owners);
             const nextActors = Object.assign({}, data.actors);
 
-            const userRecords = await fetchRecordsByIds("users", Array.from(ownerIds));
-            for (const id in userRecords) {
-                nextOwners[id] = displayRecord(userRecords[id]);
+            const unresolvedOwnerIds = new Set(ownerIds);
+            for (const collection of data.authCollections) {
+                if (!unresolvedOwnerIds.size) {
+                    break;
+                }
+
+                const records = await fetchRecordsByIds(collection.name, Array.from(unresolvedOwnerIds));
+                for (const id in records) {
+                    nextOwners[id] = collectionLabel(collection) + ": " + displayRecord(records[id]);
+                    unresolvedOwnerIds.delete(id);
+                }
             }
 
             for (const collectionName in actorIdsByCollection) {
@@ -211,36 +254,130 @@ if (!window.__betterPocketBaseApiTokensUI) {
             return result;
         }
 
-        function pickUser(selectedId, callback, btnText = "Select user") {
-            if (!data.hasUsersCollection) {
+        function collectionById(id) {
+            return data.authCollections.find((collection) => collection.id == id) || null;
+        }
+
+        function authCollectionOptions() {
+            return data.authCollections.map((collection) => ({
+                value: collection.id,
+                label: collectionLabel(collection),
+            }));
+        }
+
+        function pickOwner(collection, selectedId, callback, btnText = "Select auth record") {
+            if (!collection) {
                 return;
             }
 
-            app.modals.openRecordsPicker({
-                collection: data.usersCollection,
-                selectedIds: selectedId ? [selectedId] : [],
-                maxSelect: 1,
-                btnText: btnText,
-                onselect: (records) => {
-                    callback(records[0] || null);
+            const modalId = "api_token_owner_picker_" + app.utils.randomString();
+            const picker = store({
+                records: [],
+                selected: null,
+                isLoading: true,
+                error: "",
+            });
+
+            function select(record) {
+                picker.selected = record;
+            }
+
+            function submit() {
+                if (!picker.selected) {
+                    return;
+                }
+                callback(picker.selected, collection);
+                app.modals.close(modal);
+            }
+
+            const modal = t.div(
+                {
+                    className: "modal popup api-token-owner-picker-modal",
+                    onafterclose: (el) => el.remove(),
+                    onunmount: () => app.pb.cancelRequest(modalId),
                 },
+                t.header(
+                    { className: "modal-header" },
+                    t.h5({ className: "m-auto" }, "Select " + collectionLabel(collection) + " owner"),
+                ),
+                t.div(
+                    { className: "modal-content" },
+                    t.div(
+                        {
+                            className: "alert danger",
+                            hidden: () => !picker.error,
+                        },
+                        () => picker.error,
+                    ),
+                    () => picker.isLoading ? t.span({ className: "skeleton-loader" }) : null,
+                    () => (!picker.isLoading && !picker.records.length && !picker.error)
+                        ? t.p({ className: "txt-center txt-hint" }, "No auth records found.")
+                        : null,
+                    () => picker.records.map((record) => t.button(
+                        {
+                            type: "button",
+                            className: () => "btn secondary expanded m-b-xs " + (picker.selected?.id == record.id ? "active" : ""),
+                            onclick: () => select(record),
+                        },
+                        t.span({ className: "txt" }, ownerText(record.id, record, collection)),
+                    )),
+                ),
+                t.footer(
+                    { className: "modal-footer" },
+                    t.button(
+                        {
+                            type: "button",
+                            className: "btn transparent m-r-auto",
+                            onclick: () => app.modals.close(modal),
+                        },
+                        t.span({ className: "txt" }, "Cancel"),
+                    ),
+                    t.button(
+                        {
+                            type: "button",
+                            className: "btn",
+                            disabled: () => !picker.selected,
+                            onclick: submit,
+                        },
+                        t.span({ className: "txt" }, btnText),
+                    ),
+                ),
+            );
+
+            document.body.appendChild(modal);
+            app.modals.open(modal);
+
+            app.pb.collection(collection.name).getFullList({
+                sort: "-created",
+                requestKey: modalId,
+            }).then((records) => {
+                picker.records = records;
+                picker.selected = records.find((record) => record.id == selectedId) || null;
+                picker.isLoading = false;
+            }).catch((err) => {
+                if (!err?.isAbort) {
+                    picker.error = err?.response?.message || err?.message || "Failed to load auth records.";
+                    picker.isLoading = false;
+                    app.checkApiError(err, false);
+                }
             });
         }
 
-        function filterByUser(user) {
-            data.selectedUser = user;
+        function filterByOwner(owner, collection) {
+            data.selectedOwner = owner;
+            data.selectedOwnerCollection = collection || data.selectedOwnerCollection;
             data.page = 1;
             loadTokens(1);
         }
 
-        function clearUserFilter() {
-            data.selectedUser = null;
+        function clearOwnerFilter() {
+            data.selectedOwner = null;
             data.page = 1;
             loadTokens(1);
         }
 
         function openCreateModal() {
-            if (!data.hasUsersCollection) {
+            if (!data.hasAuthCollections) {
                 return;
             }
 
@@ -248,7 +385,8 @@ if (!window.__betterPocketBaseApiTokensUI) {
             const form = store({
                 name: "",
                 expiresAt: "",
-                user: data.selectedUser,
+                owner: data.selectedOwner,
+                ownerCollection: data.selectedOwnerCollection || data.authCollections[0],
                 isSubmitting: false,
                 error: "",
             });
@@ -258,8 +396,12 @@ if (!window.__betterPocketBaseApiTokensUI) {
 
                 form.error = "";
                 const name = form.name.trim();
-                if (!form.user?.id) {
-                    form.error = "Select the user that will own this API token.";
+                if (!form.ownerCollection?.id) {
+                    form.error = "Select the auth collection for this API token.";
+                    return;
+                }
+                if (!form.owner?.id) {
+                    form.error = "Select the auth record that will own this API token.";
                     return;
                 }
                 if (!name) {
@@ -271,7 +413,7 @@ if (!window.__betterPocketBaseApiTokensUI) {
                 try {
                     const body = {
                         name: name,
-                        userId: form.user.id,
+                        authRecordId: form.owner.id,
                     };
                     if (form.expiresAt) {
                         body.expiresAt = app.utils.toRFC3339Datetime(form.expiresAt);
@@ -314,23 +456,37 @@ if (!window.__betterPocketBaseApiTokensUI) {
                     },
                     t.div(
                         { className: "field" },
-                        t.label({ htmlFor: modalId + "_user" }, "Owner"),
+                        t.label({ htmlFor: modalId + "_collection" }, "Owner collection"),
+                        app.components.select({
+                            id: modalId + "_collection",
+                            required: true,
+                            value: () => form.ownerCollection?.id || "",
+                            options: () => authCollectionOptions(),
+                            onchange: (selected) => {
+                                form.ownerCollection = collectionById(selected?.[0]?.value || "");
+                                form.owner = null;
+                            },
+                        }),
+                    ),
+                    t.div(
+                        { className: "field" },
+                        t.label({ htmlFor: modalId + "_owner" }, "Owner"),
                         t.div(
-                            { className: "api-token-user-picker" },
+                            { className: "api-token-owner-picker" },
                             t.input({
-                                id: modalId + "_user",
+                                id: modalId + "_owner",
                                 type: "text",
                                 readOnly: true,
                                 required: true,
-                                value: () => form.user ? ownerText(form.user.id, form.user) : "",
-                                placeholder: "Select a users record",
-                                onclick: () => pickUser(form.user?.id, (user) => (form.user = user), "Use selected user"),
+                                value: () => form.owner ? ownerText(form.owner.id, form.owner, form.ownerCollection) : "",
+                                placeholder: "Select an auth record",
+                                onclick: () => pickOwner(form.ownerCollection, form.owner?.id, (owner) => (form.owner = owner), "Use selected auth record"),
                             }),
                             t.button(
                                 {
                                     type: "button",
                                     className: "btn secondary",
-                                    onclick: () => pickUser(form.user?.id, (user) => (form.user = user), "Use selected user"),
+                                    onclick: () => pickOwner(form.ownerCollection, form.owner?.id, (owner) => (form.owner = owner), "Use selected auth record"),
                                 },
                                 t.span({ className: "txt" }, "Select"),
                             ),
@@ -435,22 +591,127 @@ if (!window.__betterPocketBaseApiTokensUI) {
             app.modals.open(modal);
         }
 
-        function confirmRevoke(token) {
-            const owner = ownerText(token.userId);
+        function pushOrReplaceToken(token) {
+            const items = data.items.slice();
+            const index = items.findIndex((item) => item.id == token.id);
+            if (index >= 0) {
+                items[index] = token;
+            } else {
+                items.push(token);
+            }
+            data.items = items;
+        }
+
+        function markTokenRevoked(token) {
+            const updated = Object.assign({}, token, {
+                status: "revoked",
+                revokedAt: token.revokedAt || new Date().toISOString(),
+            });
+
+            if (data.items.some((item) => item.id == updated.id)) {
+                pushOrReplaceToken(updated);
+            }
+
+            if (data.bulkSelected[updated.id]) {
+                const bulkSelected = Object.assign({}, data.bulkSelected);
+                bulkSelected[updated.id] = updated;
+                data.bulkSelected = bulkSelected;
+            }
+
+            return updated;
+        }
+
+        async function revokeToken(token) {
+            await app.pb.send("/api/api-tokens/" + encodeURIComponent(token.id), {
+                method: "DELETE",
+                requestKey: null,
+            });
+
+            return markTokenRevoked(token);
+        }
+
+        function selectedTokens() {
+            return Object.values(data.bulkSelected);
+        }
+
+        function revokableSelectedTokens() {
+            return selectedTokens().filter((token) => token.status != "revoked");
+        }
+
+        function selectAll(state = true) {
+            const selected = {};
+            if (state) {
+                for (const token of data.items) {
+                    selected[token.id] = token;
+                }
+            }
+            data.bulkSelected = selected;
+        }
+
+        function downloadTokenJSON(token) {
+            if (!token) {
+                return;
+            }
+
+            app.utils.downloadJSON(token, tokenJSONFilename(token));
+        }
+
+        function copyTokenJSON(token) {
+            if (!token) {
+                return;
+            }
+
+            app.utils.copyToClipboard(JSON.stringify(token, null, 2));
+            app.toasts.success("API token copied to clipboard!");
+        }
+
+        function tokenJSONFilename(token) {
+            const date = (token.created || "").replaceAll(/[-:. T]/g, "");
+            return "api_token_" + (date || token.id || "details") + ".json";
+        }
+
+        function downloadSelected() {
+            const selected = selectedTokens().sort((a, b) => {
+                if (a.created < b.created) {
+                    return 1;
+                }
+                if (a.created > b.created) {
+                    return -1;
+                }
+                return 0;
+            });
+
+            if (!selected.length) {
+                return;
+            }
+
+            if (selected.length == 1) {
+                return downloadTokenJSON(selected[0]);
+            }
+
+            return app.utils.downloadJSON(selected, selected.length + "_api_tokens.json");
+        }
+
+        function confirmRevokeSelected() {
+            const selected = revokableSelectedTokens();
+            if (!selected.length) {
+                return;
+            }
+
             app.modals.confirm(
                 t.div(
                     { className: "txt-center" },
-                    t.h6(null, "Revoke API token?"),
-                    t.p(null, "This will permanently revoke ", t.strong(null, token.name), " for ", t.strong(null, owner), "."),
+                    t.h6(null, "Revoke selected API tokens?"),
+                    t.p(null, "This will permanently revoke ", t.strong(null, selected.length), " selected API token", selected.length == 1 ? "" : "s", "."),
                 ),
                 async () => {
                     try {
-                        await app.pb.send("/api/api-tokens/" + encodeURIComponent(token.id), {
-                            method: "DELETE",
-                            requestKey: null,
-                        });
-                        app.toasts.success("API token revoked.");
-                        loadTokens(data.page);
+                        for (const token of selected) {
+                            await revokeToken(token);
+                        }
+                        data.bulkSelected = {};
+                        loadTokens(1);
+                        app.toasts.success("Selected API tokens revoked.");
                     } catch (err) {
                         if (!err?.isAbort) {
                             app.checkApiError(err);
@@ -463,26 +724,220 @@ if (!window.__betterPocketBaseApiTokensUI) {
             );
         }
 
-        function openDetailsModal(token) {
-            const modal = t.div(
+        function confirmRevoke(token, onDone) {
+            if (!token || token.status == "revoked") {
+                return;
+            }
+
+            const owner = ownerText(token.authRecordId);
+            app.modals.confirm(
+                t.div(
+                    { className: "txt-center" },
+                    t.h6(null, "Revoke API token?"),
+                    t.p(null, "This will permanently revoke ", t.strong(null, token.name), " for ", t.strong(null, owner), "."),
+                ),
+                async () => {
+                    try {
+                        const updated = await revokeToken(token);
+                        app.toasts.success("API token revoked.");
+                        onDone?.(updated);
+                        loadTokens(1);
+                    } catch (err) {
+                        if (!err?.isAbort) {
+                            app.checkApiError(err);
+                            return false;
+                        }
+                    }
+                },
+                null,
+                { yesButton: "Revoke", noButton: "Cancel" },
+            );
+        }
+
+        function getTokenId(tokenIdOrModel) {
+            if (!tokenIdOrModel) {
+                return null;
+            }
+
+            return typeof tokenIdOrModel === "string" ? tokenIdOrModel : tokenIdOrModel?.id;
+        }
+
+        function openTokenPreview(token) {
+            data.activeTokenIdOrModel = token;
+        }
+
+        async function findTokenById(tokenId, requestKey) {
+            const loaded = data.items.find((token) => token.id == tokenId);
+            if (loaded) {
+                return loaded;
+            }
+
+            let page = 1;
+            let totalPages = 1;
+            while (page <= totalPages) {
+                const result = await app.pb.send("/api/api-tokens", {
+                    method: "GET",
+                    query: { page: page, perPage: 100 },
+                    requestKey: requestKey,
+                });
+
+                const found = (result.items || []).find((token) => token.id == tokenId);
+                if (found) {
+                    return found;
+                }
+
+                totalPages = result.totalPages || 0;
+                page++;
+            }
+
+            return null;
+        }
+
+        function openTokenPreviewModal(tokenIdOrModel, settings = {}) {
+            let modal;
+            const modalId = "api_token_preview_" + app.utils.randomString();
+            const dropdownId = modalId + "_dropdown";
+            const preview = store({
+                isLoading: false,
+                error: "",
+                token: null,
+            });
+
+            async function load() {
+                preview.isLoading = true;
+                preview.error = "";
+
+                try {
+                    if (app.utils.isObject(tokenIdOrModel)) {
+                        preview.token = JSON.parse(JSON.stringify(tokenIdOrModel));
+                    } else {
+                        preview.token = await findTokenById(tokenIdOrModel, modalId);
+                    }
+
+                    if (!preview.token) {
+                        preview.error = "API token not found.";
+                    } else {
+                        await resolveReferences([preview.token]);
+                    }
+
+                    preview.isLoading = false;
+                } catch (err) {
+                    if (!err?.isAbort) {
+                        preview.isLoading = false;
+                        preview.error = err?.response?.message || err?.message || "Failed to load API token.";
+                        app.checkApiError(err, false);
+                    }
+                }
+            }
+
+            modal = t.div(
                 {
-                    className: "modal popup api-token-details-modal",
-                    onafterclose: (el) => el.remove(),
+                    pbEvent: "apiTokenPreviewModal",
+                    className: "modal api-token-preview-modal",
+                    onbeforeopen: (el) => {
+                        load();
+                        return settings.onbeforeopen?.(el);
+                    },
+                    onafteropen: (el) => settings.onafteropen?.(el),
+                    onbeforeclose: (el) => settings.onbeforeclose?.(el),
+                    onafterclose: (el) => {
+                        settings.onafterclose?.(el);
+                        el?.remove();
+                    },
+                    onunmount: () => app.pb.cancelRequest(modalId),
                 },
                 t.header(
                     { className: "modal-header" },
-                    t.h5({ className: "m-auto" }, "API token details"),
+                    t.h5(null, "API token details"),
+                    t.button(
+                        {
+                            type: "button",
+                            title: "More options",
+                            className: () => "btn sm circle transparent m-l-auto " + (preview.isLoading ? "loading" : ""),
+                            disabled: () => preview.isLoading || !preview.token,
+                            "html-popovertarget": dropdownId,
+                        },
+                        t.i({ className: "ri-more-line", ariaHidden: true }),
+                    ),
+                    t.div(
+                        { id: dropdownId, className: "dropdown", popover: "auto" },
+                        (el) => {
+                            if (!preview.token) {
+                                return;
+                            }
+
+                            const actions = [
+                                t.button(
+                                    {
+                                        type: "button",
+                                        className: "dropdown-item",
+                                        onclick: () => {
+                                            copyTokenJSON(preview.token);
+                                            el.hidePopover();
+                                        },
+                                    },
+                                    t.i({ className: "ri-braces-line", ariaHidden: true }),
+                                    t.span({ className: "txt" }, "Copy JSON"),
+                                ),
+                                t.button(
+                                    {
+                                        type: "button",
+                                        className: "dropdown-item",
+                                        onclick: () => {
+                                            downloadTokenJSON(preview.token);
+                                            el.hidePopover();
+                                        },
+                                    },
+                                    t.i({ className: "ri-download-line", ariaHidden: true }),
+                                    t.span({ className: "txt" }, "Download JSON"),
+                                ),
+                            ];
+
+                            if (preview.token.status != "revoked") {
+                                actions.push(t.button(
+                                    {
+                                        type: "button",
+                                        className: "dropdown-item txt-danger",
+                                        onclick: () => {
+                                            el.hidePopover();
+                                            confirmRevoke(preview.token, (updated) => {
+                                                preview.token = updated;
+                                            });
+                                        },
+                                    },
+                                    t.i({ className: "ri-forbid-2-line", ariaHidden: true }),
+                                    t.span({ className: "txt" }, "Revoke"),
+                                ));
+                            }
+
+                            return actions;
+                        },
+                    ),
                 ),
                 t.div(
                     { className: "modal-content" },
-                    detailsTable(token),
+                    () => {
+                        if (preview.isLoading) {
+                            return t.div({ className: "block txt-center" }, t.span({ className: "loader" }));
+                        }
+
+                        if (preview.error) {
+                            return t.div({ className: "alert danger" }, preview.error);
+                        }
+
+                        if (!preview.token) {
+                            return t.div({ className: "txt-center txt-hint" }, "No API token selected.");
+                        }
+
+                        return tokenPreviewTable(preview.token);
+                    },
                 ),
                 t.footer(
                     { className: "modal-footer" },
                     t.button(
                         {
                             type: "button",
-                            className: "btn expanded",
+                            className: "btn transparent m-r-auto",
                             onclick: () => app.modals.close(modal),
                         },
                         t.span({ className: "txt" }, "Close"),
@@ -494,31 +949,35 @@ if (!window.__betterPocketBaseApiTokensUI) {
             app.modals.open(modal);
         }
 
-        function detailsTable(token) {
+        function tokenPreviewTable(token) {
             const rows = [
-                ["ID", token.id],
-                ["Name", token.name],
-                ["Owner", ownerText(token.userId)],
-                ["Owner ID", token.userId],
-                ["Access key", token.accessKey],
-                ["Status", token.status],
-                ["Created", dateText(token.created, "-")],
-                ["Updated", dateText(token.updated, "-")],
-                ["Expires", dateText(token.expiresAt, "Never")],
-                ["Last used", dateText(token.lastUsedAt, "Never")],
-                ["Revoked", dateText(token.revokedAt, "-")],
-                ["Created by", actorText(token.createdBy)],
-                ["Revoked by", actorText(token.revokedBy)],
+                { name: "id", value: token.id, copy: token.id, className: "col-field-name-id" },
+                { name: "name", value: token.name, copy: token.name, className: "col-field-type-text col-field-name-name" },
+                { name: "owner", value: ownerText(token.authRecordId), copy: ownerText(token.authRecordId), className: "col-field-type-relation col-field-name-authRecordId" },
+                { name: "authRecordId", value: token.authRecordId, copy: token.authRecordId, className: "col-field-type-relation col-field-name-authRecordId" },
+                { name: "accessKey", value: t.code({ className: "api-token-access-key" }, token.accessKey), copy: token.accessKey, className: "col-field-type-text col-field-name-accessKey" },
+                { name: "status", value: statusBadge(token.status), copy: token.status, className: "col-field-type-select col-field-name-status" },
+                { name: "created", value: dateElem(token.created, "-"), copy: dateText(token.created, "-"), className: "col-field-type-date col-field-name-created" },
+                { name: "updated", value: dateElem(token.updated, "-"), copy: dateText(token.updated, "-"), className: "col-field-type-date col-field-name-updated" },
+                { name: "expiresAt", value: dateElem(token.expiresAt, "Never"), copy: dateText(token.expiresAt, "Never"), className: "col-field-type-date col-field-name-expiresAt" },
+                { name: "lastUsedAt", value: dateElem(token.lastUsedAt, "Never"), copy: dateText(token.lastUsedAt, "Never"), className: "col-field-type-date col-field-name-lastUsedAt" },
+                { name: "revokedAt", value: dateElem(token.revokedAt, "-"), copy: dateText(token.revokedAt, "-"), className: "col-field-type-date col-field-name-revokedAt" },
+                { name: "createdBy", value: actorText(token.createdBy), copy: token.createdBy, className: "col-field-type-text col-field-name-createdBy" },
+                { name: "revokedBy", value: actorText(token.revokedBy), copy: token.revokedBy, className: "col-field-type-text col-field-name-revokedBy" },
             ];
 
             return t.table(
-                { className: "api-token-details-table" },
+                {
+                    pbEvent: "apiTokenPreviewTable",
+                    className: "api-token-preview-table responsive-table",
+                },
                 t.tbody(
                     null,
                     rows.map((row) => t.tr(
-                        null,
-                        t.th(null, row[0]),
-                        t.td(null, row[1] || "-"),
+                        { rid: "api_token_preview_" + token.id + "_" + row.name },
+                        t.th({ className: "min-width p-r-0 " + row.className }, row.name),
+                        t.td({ className: row.className }, row.value || t.span({ className: "txt-hint" }, "-")),
+                        t.td({ className: "col-copy min-width" }, app.components.copyButton(row.copy || "")),
                     )),
                 ),
             );
@@ -567,11 +1026,37 @@ if (!window.__betterPocketBaseApiTokensUI) {
             );
         }
 
+        const watchers = [];
+
         return t.div(
             {
                 pbEvent: "pageApiTokens",
                 className: "page page-api-tokens",
-                onunmount: () => app.pb.cancelRequest(requestKey),
+                onmount: () => {
+                    watchers.push(
+                        watch(() => data.activeTokenIdOrModel, (newVal) => {
+                            app.utils.replaceHashQueryParams({
+                                [tokenQueryKey]: getTokenId(newVal),
+                            });
+
+                            if (!newVal) {
+                                return;
+                            }
+
+                            app.modals.close(null, true);
+                            openTokenPreviewModal(newVal, {
+                                onafterclose: () => {
+                                    data.activeTokenIdOrModel = null;
+                                },
+                            });
+                        }),
+                    );
+                },
+                onunmount: () => {
+                    watchers.forEach((w) => w?.unwatch());
+                    app.pb.cancelRequest(requestKey);
+                    app.pb.cancelRequest(collectionsRequestKey);
+                },
             },
             settingsSidebar(),
             t.div(
@@ -587,13 +1072,13 @@ if (!window.__betterPocketBaseApiTokensUI) {
                         { className: "page-header-secondary-btns" },
                         app.components.refreshButton({
                             className: "btn circle transparent secondary tooltip-left",
-                            onclick: () => loadTokens(data.page),
+                            onclick: () => refreshAuthCollections().then(() => loadTokens(1)),
                         }),
                         t.button(
                             {
                                 type: "button",
                                 className: "btn",
-                                disabled: () => !data.hasUsersCollection,
+                                disabled: () => !data.hasAuthCollections,
                                 onclick: openCreateModal,
                             },
                             t.i({ className: "ri-add-line", ariaHidden: true }),
@@ -606,34 +1091,47 @@ if (!window.__betterPocketBaseApiTokensUI) {
                     t.div(
                         {
                             className: "alert warning",
-                            hidden: () => !data.setupChecked || data.hasUsersCollection,
+                            hidden: () => !data.setupChecked || data.hasAuthCollections,
                         },
-                        "Create a `users` auth collection before creating API tokens",
+                        "Create an auth collection before creating API tokens",
                     ),
                     t.div(
                         { className: "api-tokens-toolbar" },
                         t.div(
                             { className: "api-token-filter" },
                             t.span({ className: "txt-bold" }, "Owner filter"),
+                            app.components.select({
+                                id: uniqueId + "_owner_filter_collection",
+                                required: true,
+                                disabled: () => !data.hasAuthCollections,
+                                value: () => data.selectedOwnerCollection?.id || "",
+                                options: () => authCollectionOptions(),
+                                onchange: (selected) => {
+                                    data.selectedOwnerCollection = collectionById(selected?.[0]?.value || "");
+                                    data.selectedOwner = null;
+                                    data.page = 1;
+                                    loadTokens(1);
+                                },
+                            }),
                             t.span(
                                 { className: "api-token-filter-value" },
-                                () => data.selectedUser ? ownerText(data.selectedUser.id, data.selectedUser) : "All users",
+                                () => data.selectedOwner ? ownerText(data.selectedOwner.id, data.selectedOwner, data.selectedOwnerCollection) : "All auth records",
                             ),
                             t.button(
                                 {
                                     type: "button",
                                     className: "btn sm secondary",
-                                    disabled: () => !data.hasUsersCollection,
-                                    onclick: () => pickUser(data.selectedUser?.id, filterByUser, "Filter by selected user"),
+                                    disabled: () => !data.hasAuthCollections,
+                                    onclick: () => pickOwner(data.selectedOwnerCollection, data.selectedOwner?.id, filterByOwner, "Filter by selected auth record"),
                                 },
-                                t.span({ className: "txt" }, "Filter by user"),
+                                t.span({ className: "txt" }, "Filter by record"),
                             ),
                             t.button(
                                 {
                                     type: "button",
                                     className: "btn sm transparent secondary",
-                                    hidden: () => !data.selectedUser,
-                                    onclick: clearUserFilter,
+                                    hidden: () => !data.selectedOwner,
+                                    onclick: clearOwnerFilter,
                                 },
                                 t.span({ className: "txt" }, "Clear"),
                             ),
@@ -647,7 +1145,6 @@ if (!window.__betterPocketBaseApiTokensUI) {
                         () => data.error,
                     ),
                     tokensTable(),
-                    pagination(),
                 ),
                 t.footer({ className: "page-footer" }, app.components.credits()),
             ),
@@ -655,30 +1152,100 @@ if (!window.__betterPocketBaseApiTokensUI) {
 
         function tokensTable() {
             return t.div(
-                { className: "api-tokens-table-scroll" },
+                { className: "page-table-wrapper api-tokens-table-wrapper" },
                 t.table(
                     { className: "records-table responsive-table api-tokens-table" },
                     t.thead(
                         { className: "sticky" },
                         t.tr(
                             null,
-                            t.th(null, "Name"),
-                            t.th(null, "Owner"),
-                            t.th(null, "Status"),
-                            t.th(null, "Access key"),
-                            t.th(null, "Created"),
-                            t.th(null, "Expires"),
-                            t.th(null, "Last used"),
-                            t.th({ className: "col-actions" }, "Actions"),
+                            t.th(
+                                { className: "col-bulk-select" },
+                                t.div(
+                                    {
+                                        className: "field",
+                                        hidden: () => data.isLoading,
+                                    },
+                                    t.input({
+                                        id: uniqueId + "_select_all",
+                                        type: "checkbox",
+                                        disabled: () => !data.items.length,
+                                        checked: () => data.areAllSelected,
+                                        onchange: (e) => selectAll(e.target.checked),
+                                    }),
+                                    t.label({ htmlFor: uniqueId + "_select_all" }),
+                                ),
+                                t.span({
+                                    className: "loader",
+                                    hidden: () => !data.isLoading,
+                                }),
+                            ),
+                            t.th(
+                                { className: "col-field-type-text col-field-name-name" },
+                                t.div(
+                                    { className: "inline-flex gap-5" },
+                                    t.i({ className: "ri-key-2-line", ariaHidden: true }),
+                                    t.span({ className: "txt" }, "Name"),
+                                ),
+                            ),
+                            t.th(
+                                { className: "col-field-type-relation col-field-name-authRecordId" },
+                                t.div(
+                                    { className: "inline-flex gap-5" },
+                                    t.i({ className: "ri-user-line", ariaHidden: true }),
+                                    t.span({ className: "txt" }, "Owner"),
+                                ),
+                            ),
+                            t.th(
+                                { className: "col-field-type-select col-field-name-status" },
+                                t.div(
+                                    { className: "inline-flex gap-5" },
+                                    t.i({ className: "ri-bookmark-line", ariaHidden: true }),
+                                    t.span({ className: "txt" }, "Status"),
+                                ),
+                            ),
+                            t.th(
+                                { className: "col-field-type-text col-field-name-accessKey" },
+                                t.div(
+                                    { className: "inline-flex gap-5" },
+                                    t.i({ className: "ri-fingerprint-line", ariaHidden: true }),
+                                    t.span({ className: "txt" }, "Access key"),
+                                ),
+                            ),
+                            t.th(
+                                { className: "col-field-type-date col-field-name-created" },
+                                t.div(
+                                    { className: "inline-flex gap-5" },
+                                    t.i({ className: "ri-calendar-line", ariaHidden: true }),
+                                    t.span({ className: "txt" }, "Created"),
+                                ),
+                            ),
+                            t.th(
+                                { className: "col-field-type-date col-field-name-expiresAt" },
+                                t.div(
+                                    { className: "inline-flex gap-5" },
+                                    t.i({ className: "ri-calendar-event-line", ariaHidden: true }),
+                                    t.span({ className: "txt" }, "Expires"),
+                                ),
+                            ),
+                            t.th(
+                                { className: "col-field-type-date col-field-name-lastUsedAt" },
+                                t.div(
+                                    { className: "inline-flex gap-5" },
+                                    t.i({ className: "ri-history-line", ariaHidden: true }),
+                                    t.span({ className: "txt" }, "Last used"),
+                                ),
+                            ),
+                            t.th({ className: "col-meta" }),
                         ),
                     ),
                     t.tbody(
                         null,
                         () => {
-                            if (data.isLoading) {
+                            if (!data.items.length && data.isLoading) {
                                 return t.tr(
                                     null,
-                                    t.td({ colSpan: 8 }, t.span({ className: "skeleton-loader" })),
+                                    t.td({ colSpan: 99 }, t.span({ className: "skeleton-loader" })),
                                 );
                             }
 
@@ -686,99 +1253,198 @@ if (!window.__betterPocketBaseApiTokensUI) {
                                 return t.tr(
                                     null,
                                     t.td(
-                                        { colSpan: 8, className: "txt-center txt-hint" },
-                                        data.selectedUser ? "No API tokens found for the selected user." : "No API tokens found.",
+                                        { colSpan: 99 },
+                                        t.div(
+                                            { className: "sticky-content txt-center txt-hint" },
+                                            t.div({ className: "txt-bold" }, "No API tokens found."),
+                                            data.selectedOwner ? "No API tokens found for the selected auth record." : "Create a token to get started.",
+                                        ),
                                     ),
                                 );
                             }
 
-                            return data.items.map((token) => t.tr(
-                                { rid: token.id },
-                                t.td({ "html-data-label": "Name" }, t.span({ className: "txt-bold" }, token.name)),
-                                t.td({ "html-data-label": "Owner" }, ownerCell(token.userId)),
-                                t.td({ "html-data-label": "Status" }, statusBadge(token.status)),
-                                t.td(
-                                    { "html-data-label": "Access key" },
-                                    t.code({ className: "api-token-access-key" }, token.accessKey),
-                                ),
-                                t.td({ "html-data-label": "Created" }, dateElem(token.created, "-")),
-                                t.td({ "html-data-label": "Expires" }, dateElem(token.expiresAt, "Never")),
-                                t.td({ "html-data-label": "Last used" }, dateElem(token.lastUsedAt, "Never")),
-                                t.td(
-                                    { "html-data-label": "Actions", className: "api-token-actions" },
-                                    t.button(
-                                        {
-                                            type: "button",
-                                            className: "btn sm secondary",
-                                            onclick: () => openDetailsModal(token),
+                            return data.items.map((token) => {
+                                const tokenId = token.id;
+                                const currentToken = () => data.items.find((item) => item.id == tokenId) || token;
+
+                                return t.tr(
+                                    {
+                                        rid: tokenId,
+                                        tabIndex: 0,
+                                        role: "button",
+                                        className: "handle",
+                                        onclick: (e) => {
+                                            e.preventDefault();
+                                            openTokenPreview(currentToken());
                                         },
-                                        t.span({ className: "txt" }, "Details"),
-                                    ),
-                                    t.button(
-                                        {
-                                            type: "button",
-                                            className: "btn sm warning",
-                                            hidden: () => token.status == "revoked",
-                                            onclick: () => confirmRevoke(token),
+                                        onkeypress: (e) => {
+                                            if (e.key == "Enter" || e.key == " ") {
+                                                e.preventDefault();
+                                                openTokenPreview(currentToken());
+                                            }
                                         },
-                                        t.span({ className: "txt" }, "Revoke"),
+                                    },
+                                    t.td(
+                                        {
+                                            className: "col-bulk-select",
+                                            onclick: (e) => e.stopPropagation(),
+                                            onkeypress: (e) => e.stopPropagation(),
+                                        },
+                                        t.div(
+                                            { className: "field" },
+                                            t.input({
+                                                id: uniqueId + "_" + tokenId,
+                                                type: "checkbox",
+                                                checked: () => !!data.bulkSelected[tokenId],
+                                                onchange: (e) => {
+                                                    const bulkSelected = Object.assign({}, data.bulkSelected);
+                                                    if (e.target.checked) {
+                                                        bulkSelected[tokenId] = currentToken();
+                                                    } else {
+                                                        delete bulkSelected[tokenId];
+                                                    }
+                                                    data.bulkSelected = bulkSelected;
+                                                },
+                                            }),
+                                            t.label({ htmlFor: uniqueId + "_" + tokenId }),
+                                        ),
                                     ),
-                                ),
-                            ));
+                                    t.td(
+                                        {
+                                            "html-data-name": "Name",
+                                            className: "col-field-type-text col-field-name-name",
+                                        },
+                                        t.span({ className: "txt-bold" }, () => currentToken().name),
+                                    ),
+                                    t.td(
+                                        {
+                                            "html-data-name": "Owner",
+                                            className: "col-field-type-relation col-field-name-authRecordId",
+                                        },
+                                        () => ownerCell(currentToken().authRecordId),
+                                    ),
+                                    t.td(
+                                        {
+                                            "html-data-name": "Status",
+                                            className: "col-field-type-select col-field-name-status",
+                                        },
+                                        () => statusBadge(currentToken().status),
+                                    ),
+                                    t.td(
+                                        {
+                                            "html-data-name": "Access key",
+                                            className: "col-field-type-text col-field-name-accessKey",
+                                        },
+                                        () => t.code({ className: "api-token-access-key" }, currentToken().accessKey),
+                                    ),
+                                    t.td(
+                                        {
+                                            "html-data-name": "Created",
+                                            className: "col-field-type-date col-field-name-created",
+                                        },
+                                        () => dateElem(currentToken().created, "-"),
+                                    ),
+                                    t.td(
+                                        {
+                                            "html-data-name": "Expires",
+                                            className: "col-field-type-date col-field-name-expiresAt",
+                                        },
+                                        () => dateElem(currentToken().expiresAt, "Never"),
+                                    ),
+                                    t.td(
+                                        {
+                                            "html-data-name": "Last used",
+                                            className: "col-field-type-date col-field-name-lastUsedAt",
+                                        },
+                                        () => dateElem(currentToken().lastUsedAt, "Never"),
+                                    ),
+                                    t.td(
+                                        { className: "col-meta" },
+                                        t.i({ className: "ri-arrow-right-line", ariaHidden: true }),
+                                    ),
+                                );
+                            });
                         },
+                        t.tr(
+                            { hidden: () => !data.canLoadMore },
+                            t.td(
+                                { colSpan: 99 },
+                                t.button(
+                                    {
+                                        type: "button",
+                                        className: () => "btn lg secondary load-more-btn " + (data.isLoading ? "transparent loading" : ""),
+                                        disabled: () => data.isLoading,
+                                        onclick: () => loadTokens(data.page + 1),
+                                    },
+                                    t.span({ className: "txt" }, "Load more"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+                t.div(
+                    { className: "bulkbar-wrapper" },
+                    t.div(
+                        {
+                            hidden: () => !data.totalSelected,
+                            className: "bulkbar api-tokens-bulkbar",
+                        },
+                        t.span(
+                            { className: "txt" },
+                            "Selected ",
+                            t.strong(null, () => data.totalSelected),
+                            () => " " + (data.totalSelected == 1 ? "token" : "tokens"),
+                        ),
+                        t.button(
+                            {
+                                type: "button",
+                                className: "btn sm secondary pill m-r-auto",
+                                onclick: () => selectAll(false),
+                            },
+                            t.span({ className: "txt" }, "Reset"),
+                        ),
+                        t.button(
+                            {
+                                type: "button",
+                                className: "btn sm pill outline danger",
+                                disabled: () => !revokableSelectedTokens().length,
+                                onclick: confirmRevokeSelected,
+                            },
+                            t.i({ className: "ri-forbid-2-line", ariaHidden: true }),
+                            t.span({ className: "txt" }, "Revoke"),
+                        ),
+                        t.button(
+                            {
+                                type: "button",
+                                className: "btn sm pill",
+                                onclick: downloadSelected,
+                            },
+                            t.i({ className: "ri-download-line", ariaHidden: true }),
+                            t.span({ className: "txt" }, "JSON"),
+                        ),
                     ),
                 ),
             );
         }
 
-        function pagination() {
-            return t.div(
-                { className: "api-tokens-pagination" },
-                t.div(
-                    { className: "txt-hint" },
-                    () => {
-                        if (data.totalItems == 0) {
-                            return "0 tokens";
-                        }
-                        return "Page " + data.page + " of " + data.totalPages + " · " + data.totalItems + " tokens";
-                    },
-                ),
-                t.div(
-                    { className: "api-tokens-pagination-actions" },
-                    t.button(
-                        {
-                            type: "button",
-                            className: "btn sm secondary",
-                            disabled: () => !data.canGoPrevious,
-                            onclick: () => loadTokens(data.page - 1),
-                        },
-                        t.span({ className: "txt" }, "Previous"),
-                    ),
-                    t.button(
-                        {
-                            type: "button",
-                            className: "btn sm secondary",
-                            disabled: () => !data.canGoNext,
-                            onclick: () => loadTokens(data.page + 1),
-                        },
-                        t.span({ className: "txt" }, "Next"),
-                    ),
-                ),
-            );
-        }
-
-        function ownerCell(userId) {
-            const owner = data.owners[userId];
+        function ownerCell(authRecordId) {
+            const owner = data.owners[authRecordId];
             return t.div(
                 { className: "api-token-owner" },
-                t.span({ className: "api-token-owner-label" }, owner || userId || "-"),
-                () => owner ? t.small({ className: "txt-hint" }, userId) : null,
+                t.span({ className: "api-token-owner-label" }, owner || authRecordId || "-"),
+                () => owner ? t.small({ className: "txt-hint" }, authRecordId) : null,
             );
         }
 
         function statusBadge(status) {
+            const labelClass = {
+                active: "success",
+                expired: "warning",
+                revoked: "danger",
+            }[status] || "";
+
             return t.span(
-                { className: "api-token-status api-token-status-" + status },
+                { className: "label sm " + labelClass },
                 status || "unknown",
             );
         }
@@ -807,13 +1473,18 @@ if (!window.__betterPocketBaseApiTokensUI) {
             return record.email || record.username || record.name || record.id;
         }
 
-        function ownerText(userId, record = null) {
+        function collectionLabel(collection) {
+            return collection?.name || collection?.id || "-";
+        }
+
+        function ownerText(authRecordId, record = null, collection = null) {
             if (record) {
-                return displayRecord(record) + " (" + record.id + ")";
+                const prefix = collection ? collectionLabel(collection) + ": " : "";
+                return prefix + displayRecord(record) + " (" + record.id + ")";
             }
 
-            const owner = data.owners[userId];
-            return owner ? owner + " (" + userId + ")" : userId || "-";
+            const owner = data.owners[authRecordId];
+            return owner ? owner + " (" + authRecordId + ")" : authRecordId || "-";
         }
 
         function actorText(actor) {

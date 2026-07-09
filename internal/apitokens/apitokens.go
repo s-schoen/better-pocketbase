@@ -48,9 +48,10 @@ const (
 var uiAssets embed.FS
 
 var (
-	errInvalidToken = errors.New("invalid api token")
-	errExpiredToken = errors.New("expired api token")
-	errRevokedToken = errors.New("revoked api token")
+	errInvalidToken          = errors.New("invalid api token")
+	errExpiredToken          = errors.New("expired api token")
+	errRevokedToken          = errors.New("revoked api token")
+	errDuplicateAuthRecordID = errors.New("duplicate auth record id")
 )
 
 type tokenParts struct {
@@ -59,24 +60,24 @@ type tokenParts struct {
 }
 
 type createRequest struct {
-	Name      string `json:"name" form:"name"`
-	UserID    string `json:"userId" form:"userId"`
-	ExpiresAt string `json:"expiresAt" form:"expiresAt"`
+	Name         string `json:"name" form:"name"`
+	AuthRecordID string `json:"authRecordId" form:"authRecordId"`
+	ExpiresAt    string `json:"expiresAt" form:"expiresAt"`
 }
 
 type tokenResponse struct {
-	ID         string `json:"id"`
-	UserID     string `json:"userId"`
-	Name       string `json:"name"`
-	AccessKey  string `json:"accessKey"`
-	Status     string `json:"status"`
-	Created    string `json:"created"`
-	Updated    string `json:"updated"`
-	ExpiresAt  string `json:"expiresAt"`
-	RevokedAt  string `json:"revokedAt"`
-	LastUsedAt string `json:"lastUsedAt"`
-	CreatedBy  string `json:"createdBy"`
-	RevokedBy  string `json:"revokedBy"`
+	ID           string `json:"id"`
+	AuthRecordID string `json:"authRecordId"`
+	Name         string `json:"name"`
+	AccessKey    string `json:"accessKey"`
+	Status       string `json:"status"`
+	Created      string `json:"created"`
+	Updated      string `json:"updated"`
+	ExpiresAt    string `json:"expiresAt"`
+	RevokedAt    string `json:"revokedAt"`
+	LastUsedAt   string `json:"lastUsedAt"`
+	CreatedBy    string `json:"createdBy"`
+	RevokedBy    string `json:"revokedBy"`
 }
 
 type createResponse struct {
@@ -110,8 +111,12 @@ func Register(app core.App) {
 		},
 	})
 
-	app.OnRecordDeleteExecute("users").BindFunc(func(e *core.RecordEvent) error {
-		if err := deleteTokensForUser(e.App, e.Record.Id); err != nil {
+	app.OnRecordDeleteExecute().BindFunc(func(e *core.RecordEvent) error {
+		if e.Record == nil || !e.Record.Collection().IsAuth() {
+			return e.Next()
+		}
+
+		if err := deleteTokensForAuthRecord(e.App, e.Record.Id); err != nil {
 			return err
 		}
 
@@ -188,7 +193,7 @@ func jwtOnlyManagementAuth() *hook.Handler[*core.RequestEvent] {
 				return e.UnauthorizedError("The request requires valid record authorization token.", nil)
 			}
 
-			if e.Auth.IsSuperuser() || e.Auth.Collection().Name == "users" {
+			if e.Auth.Collection().IsAuth() {
 				return e.Next()
 			}
 
@@ -250,20 +255,20 @@ func createToken(e *core.RequestEvent) error {
 		return e.BadRequestError("API token name is too long.", nil)
 	}
 
-	targetUserID, err := resolveTargetUserID(e, strings.TrimSpace(body.UserID))
+	targetAuthRecordID, err := resolveTargetAuthRecordID(e, strings.TrimSpace(body.AuthRecordID))
 	if err != nil {
 		return err
 	}
 
-	targetUser, err := e.App.FindRecordById("users", targetUserID)
+	targetAuthRecord, err := findAuthRecordById(e.App, targetAuthRecordID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return e.BadRequestError("Invalid target user.", nil)
+			return e.BadRequestError("Invalid target auth record.", nil)
 		}
-		return e.InternalServerError("Failed to load target user.", err)
-	}
-	if targetUser.Collection().Name != "users" {
-		return e.BadRequestError("Invalid target user.", nil)
+		if errors.Is(err, errDuplicateAuthRecordID) {
+			return e.BadRequestError("Invalid target auth record.", nil)
+		}
+		return e.InternalServerError("Failed to load target auth record.", err)
 	}
 
 	expiresAt, err := parseOptionalFutureDate(body.ExpiresAt)
@@ -282,7 +287,7 @@ func createToken(e *core.RequestEvent) error {
 	}
 
 	record := core.NewRecord(collection)
-	record.Set("userId", targetUser.Id)
+	record.Set("authRecordId", targetAuthRecord.Id)
 	record.Set("name", body.Name)
 	record.Set("accessKey", parts.Access)
 	record.Set("secretHash", hashSecret(parts.Secret))
@@ -315,7 +320,7 @@ func revokeToken(e *core.RequestEvent) error {
 		return e.InternalServerError("Failed to load API token.", err)
 	}
 
-	if !e.Auth.IsSuperuser() && record.GetString("userId") != e.Auth.Id {
+	if !e.Auth.IsSuperuser() && record.GetString("authRecordId") != e.Auth.Id {
 		return e.NotFoundError("API token not found.", nil)
 	}
 
@@ -353,15 +358,15 @@ func authenticateToken(e *core.RequestEvent, parts tokenParts) (*core.Record, *c
 		return nil, nil, errExpiredToken
 	}
 
-	user, err := e.App.FindRecordById("users", tokenRecord.GetString("userId"))
+	authRecord, err := findAuthRecordById(e.App, tokenRecord.GetString("authRecordId"))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil, errInvalidToken
 		}
+		if errors.Is(err, errDuplicateAuthRecordID) {
+			return nil, nil, errInvalidToken
+		}
 		return nil, nil, err
-	}
-	if user.Collection().Name != "users" {
-		return nil, nil, errInvalidToken
 	}
 
 	e.Set(core.RequestEventKeyInfoContext, RequestContextAPIToken)
@@ -369,7 +374,7 @@ func authenticateToken(e *core.RequestEvent, parts tokenParts) (*core.Record, *c
 	if err != nil {
 		return nil, nil, err
 	}
-	canAuth, err := e.App.CanAccessRecord(user, info, user.Collection().AuthRule)
+	canAuth, err := e.App.CanAccessRecord(authRecord, info, authRecord.Collection().AuthRule)
 	if !canAuth {
 		if err != nil {
 			return nil, nil, err
@@ -377,11 +382,11 @@ func authenticateToken(e *core.RequestEvent, parts tokenParts) (*core.Record, *c
 		return nil, nil, errInvalidToken
 	}
 
-	return tokenRecord, user, nil
+	return tokenRecord, authRecord, nil
 }
 
-func deleteTokensForUser(app core.App, userID string) error {
-	records, err := app.FindAllRecords(CollectionName, dbx.HashExp{"userId": userID})
+func deleteTokensForAuthRecord(app core.App, authRecordID string) error {
+	records, err := app.FindAllRecords(CollectionName, dbx.HashExp{"authRecordId": authRecordID})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
@@ -400,34 +405,67 @@ func deleteTokensForUser(app core.App, userID string) error {
 
 func listTokenExpressions(e *core.RequestEvent) []dbx.Expression {
 	if !e.Auth.IsSuperuser() {
-		return []dbx.Expression{dbx.HashExp{"userId": e.Auth.Id}}
+		return []dbx.Expression{dbx.HashExp{"authRecordId": e.Auth.Id}}
 	}
 
-	userID := strings.TrimSpace(e.Request.URL.Query().Get("userId"))
-	if userID == "" {
+	authRecordID := strings.TrimSpace(e.Request.URL.Query().Get("authRecordId"))
+	if authRecordID == "" {
 		return nil
 	}
 
-	return []dbx.Expression{dbx.HashExp{"userId": userID}}
+	return []dbx.Expression{dbx.HashExp{"authRecordId": authRecordID}}
 }
 
-func resolveTargetUserID(e *core.RequestEvent, requestedUserID string) (string, error) {
+func resolveTargetAuthRecordID(e *core.RequestEvent, requestedAuthRecordID string) (string, error) {
 	if e.Auth.IsSuperuser() {
-		if requestedUserID == "" {
-			return "", e.BadRequestError("Target userId is required.", nil)
+		if requestedAuthRecordID == "" {
+			return "", e.BadRequestError("Target authRecordId is required.", nil)
 		}
-		return requestedUserID, nil
+		return requestedAuthRecordID, nil
 	}
 
-	if e.Auth.Collection().Name != "users" {
+	if !e.Auth.Collection().IsAuth() {
 		return "", e.ForbiddenError("The authorized record is not allowed to manage API tokens.", nil)
 	}
 
-	if requestedUserID != "" && requestedUserID != e.Auth.Id {
-		return "", e.ForbiddenError("You are not allowed to create API tokens for another user.", nil)
+	if requestedAuthRecordID != "" && requestedAuthRecordID != e.Auth.Id {
+		return "", e.ForbiddenError("You are not allowed to create API tokens for another auth record.", nil)
 	}
 
 	return e.Auth.Id, nil
+}
+
+func findAuthRecordById(app core.App, id string) (*core.Record, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, sql.ErrNoRows
+	}
+
+	authCollections, err := app.FindAllCollections(core.CollectionTypeAuth)
+	if err != nil {
+		return nil, err
+	}
+
+	var found *core.Record
+	for _, collection := range authCollections {
+		record, err := app.FindRecordById(collection, id)
+		if err == nil {
+			if found != nil {
+				return nil, errDuplicateAuthRecordID
+			}
+			found = record
+			continue
+		}
+
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+
+	if found == nil {
+		return nil, sql.ErrNoRows
+	}
+
+	return found, nil
 }
 
 func parseOptionalFutureDate(raw string) (types.DateTime, error) {
@@ -452,18 +490,18 @@ func parseOptionalFutureDate(raw string) (types.DateTime, error) {
 
 func exportToken(record *core.Record, now types.DateTime) tokenResponse {
 	return tokenResponse{
-		ID:         record.Id,
-		UserID:     record.GetString("userId"),
-		Name:       record.GetString("name"),
-		AccessKey:  record.GetString("accessKey"),
-		Status:     tokenStatus(record, now),
-		Created:    record.GetDateTime("created").String(),
-		Updated:    record.GetDateTime("updated").String(),
-		ExpiresAt:  record.GetDateTime("expiresAt").String(),
-		RevokedAt:  record.GetDateTime("revokedAt").String(),
-		LastUsedAt: record.GetDateTime("lastUsedAt").String(),
-		CreatedBy:  record.GetString("createdBy"),
-		RevokedBy:  record.GetString("revokedBy"),
+		ID:           record.Id,
+		AuthRecordID: record.GetString("authRecordId"),
+		Name:         record.GetString("name"),
+		AccessKey:    record.GetString("accessKey"),
+		Status:       tokenStatus(record, now),
+		Created:      record.GetDateTime("created").String(),
+		Updated:      record.GetDateTime("updated").String(),
+		ExpiresAt:    record.GetDateTime("expiresAt").String(),
+		RevokedAt:    record.GetDateTime("revokedAt").String(),
+		LastUsedAt:   record.GetDateTime("lastUsedAt").String(),
+		CreatedBy:    record.GetString("createdBy"),
+		RevokedBy:    record.GetString("revokedBy"),
 	}
 }
 

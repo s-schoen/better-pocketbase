@@ -5,7 +5,7 @@ Date: 2026-07-08
 
 ## Context
 
-ADR 0001 defines user-owned API tokens and exposes management operations through custom API endpoints under `/api/api-tokens`.
+ADR 0001 defines API tokens and exposes management operations through custom API endpoints under `/api/api-tokens`. ADR 0003 generalizes token ownership from `users` records to any PocketBase auth record.
 
 Those endpoints are usable directly, but token management is currently inconvenient for superusers because there is no Dashboard UI. Normal authenticated `users` records can also manage their own tokens through the API, but this project does not yet have a user-facing application or shared session contract that a token-management UI can reuse.
 
@@ -22,21 +22,21 @@ Superuser UI scope:
 - Recreate the Settings sidebar using globally available Dashboard primitives and `app.store.settingsNavGroups`, instead of importing private Dashboard modules.
 - Show all API tokens by default using the existing superuser behavior of `GET /api/api-tokens`.
 - Support simple server-backed pagination with the existing API defaults.
-- Support filtering by owner with the built-in `users` record picker and the existing `userId` query parameter.
-- Support creating tokens for a selected `users` record with the built-in record picker.
+- Support filtering by owner with an auth collection selector, the built-in record picker, and the `authRecordId` query parameter.
+- Support creating tokens for a selected auth record with the built-in record picker.
 - Leave `expiresAt` blank by default and present that as `Never expires`.
 - Show the raw token only once after creation in a blocking reveal modal with copy support and a warning that it cannot be viewed again.
 - Support revoking any non-revoked token, including expired tokens, after confirmation.
 - Keep the main table focused on name, owner, status, access key, created time, expiry, last-used time, and actions.
 - Expose full audit metadata through row details or a preview surface.
-- Resolve visible owner records to user email where possible, falling back to raw user ids.
-- Resolve `createdBy` and `revokedBy` actor strings best-effort across `users` and `_superusers`, falling back to the raw `collection:id` value.
-- If the `users` collection does not exist, show a setup empty state and disable token creation.
+- Resolve visible owner records across auth collections where possible, falling back to raw auth record ids.
+- Resolve `createdBy` and `revokedBy` actor strings best-effort across their referenced collections, falling back to the raw `collection:id` value.
+- If no auth collection exists, show a setup empty state and disable token creation.
 
 Normal-user UI scope:
 
 - Do not ship a normal-user token-management page in the first UI implementation.
-- Normal authenticated `users` records continue to manage their own API tokens through the API defined in ADR 0001.
+- Normal authenticated auth records continue to manage their own API tokens through the API defined in ADR 0001 and ADR 0003.
 - A future normal-user UI requires a separate decision about session ownership, login flow, or host-app embedding. We explicitly avoid passing JWTs through URLs.
 
 Implementation shape:
